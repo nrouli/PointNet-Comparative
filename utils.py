@@ -23,9 +23,9 @@ def build_mlgp(input_shape=(4, 3), output_dim=10, hidden_layer_sizes=[4], bias=F
     return model
 
 
-def build_point_net_pp(output_dim=10, activation=nn.functional.relu, dropout=0.2, version=0):
+def build_point_net_pp(output_dim=10):
     print('\nmodel: PointNet++')
-    model = PointNetPP(output_dim, activation, dropout, version=version)
+    model = PointNetPP(output_dim)
     return model
 
 

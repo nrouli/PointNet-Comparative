@@ -3,13 +3,26 @@ import numpy as np
 from utils import *
 import matplotlib.pyplot as plt
 from time import time
+from tqdm import tqdm
+import argparse
 
 
-# MODEL_PATH = 'pretrained_models/VNPointNet_Lite_clean.tar'
-MODEL_PATH = 'pretrained_models/CGAPointNet++_clean.tar'
-# MODEL_PATH = 'pretrained_models/PointNet++_clean.tar'
-# MODEL_PATH = 'pretrained_models/mlgp_clean.tar'
+def parse_args():
+    '''Parameters'''
+    parser = argparse.ArgumentParser('PointNet Testing')
+    
+    # Model selection
+    parser.add_argument('--model', default='pointnet_pp', choices=['pointnet_pp', 'cga_pointnet_pp', 'vn_pointnet'], help='Model to test')
 
+    parser.add_argument('--trials', type=int, default=10, help='Number of evaluation runs for proper statistical analysis')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for evaluation with limited CUDA memory')    
+    
+    parser.add_argument('--test_baseline', action='store_true', help='Test the accuracy of PointNet++ under rotations')
+    parser.add_argument('--test_geom', action='store_true', help='Test the accuracy of CGA-PointNet++ under rotations')
+    parser.add_argument('--test_vn', action='store_true', help='Test the accuracy of VN-PointNet under rotations')
+
+    
+    return parser.parse_args()
 
 
 def rotation_matrix_axis(axis, theta):
@@ -53,29 +66,29 @@ def batched_score(model, X, Y, batch_size=128, device='cpu'):
 
 
 
-def evaluate_rotation_robustness(model, Xtest, Ytest, n_trials=10, device='cpu'):
+def evaluate_rotation_robustness(model, Xtest, Ytest, n_trials=10, batch_size=128,  device='cpu'):
     """Evaluate model under different rotation types."""
     
-    test_acc = batched_score(model, Xtest, Ytest, batch_size=128, device=device)
+    test_acc = batched_score(model, Xtest, Ytest, batch_size=batch_size, device=device)
     
     rotation_types = {
-        'x-axis': lambda: rotation_matrix_axis('x', np.random.uniform(0, 2*np.pi)),
-        'y-axis': lambda: rotation_matrix_axis('y', np.random.uniform(0, 2*np.pi)),
-        'z-axis': lambda: rotation_matrix_axis('z', np.random.uniform(0, 2*np.pi)),
+        #'x-axis': lambda: rotation_matrix_axis('x', np.random.uniform(0, 2*np.pi)),
+        #'y-axis': lambda: rotation_matrix_axis('y', np.random.uniform(0, 2*np.pi)),
+        #'z-axis': lambda: rotation_matrix_axis('z', np.random.uniform(0, 2*np.pi)),
         'arbitrary': lambda: random_rotation_matrix(0, 1),
     }
     
     results = {}
     
     with torch.no_grad():
-        for rot_name, rot_fn in rotation_types.items():
+        for i, (rot_name, rot_fn) in enumerate(rotation_types.items()):
             accuracies = []
-            for _ in range(n_trials):
+            for _ in tqdm(range(n_trials), desc=f'Rotation Axis {i+1}/{len(rotation_types.items())}'):
                 Xtest_rot = torch.stack([
                     x @ torch.tensor(rot_fn(), dtype=x.dtype)
                     for x in Xtest
                 ])
-                accuracies.append(batched_score(model, Xtest_rot, Ytest, batch_size=128, device=device))
+                accuracies.append(batched_score(model, Xtest_rot, Ytest, batch_size=batch_size, device=device))
             
             results[rot_name] = np.array(accuracies)
     
@@ -88,6 +101,20 @@ def evaluate_rotation_robustness(model, Xtest, Ytest, n_trials=10, device='cpu')
               f'{test_acc - accs.mean():>8.5f} {accs.min():>8.5f} {accs.max():>8.5f}')
     
     return test_acc, results
+
+
+
+def test_model(MODEL_PATH, Xtest, Ytest, n_trials=20, batch_size=128):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model_dic = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+    model = model_dic['model'].to(device)
+    Xtest, Ytest = Xtest.cpu(), Ytest.cpu()
+    
+    print(f'\nModel: {model_dic["name"]}')
+    evaluate_rotation_robustness(model, Xtest, Ytest, n_trials=n_trials, batch_size=batch_size, device=device)   
+
+
+
 def main():
     print('\nLoading data and model...')
     _, (Xtest, Ytest) = get_model_net_data(
@@ -95,15 +122,23 @@ def main():
         class_size=10, force_reload=False, distortion=0.0
     )
     
+    args = parse_args()
+    
+    if args.test_baseline:
+        MODEL_PATH = 'pretrained_models/PointNet++_clean.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+    
+    if args.test_geom:
+        MODEL_PATH = 'pretrained_models/CGAPointNet++_clean.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+    
+    if args.test_vn:
+        MODEL_PATH = 'pretrained_models/VNPointNet_Lite_clean.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+    
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_dic = torch.load(MODEL_PATH, map_location=device, weights_only=False)
-    model = model_dic['model'].to(device)
-    Xtest, Ytest = Xtest.cpu(), Ytest.cpu()
     
-    print(f'\nModel: {model_dic["name"]}')
-    evaluate_rotation_robustness(model, Xtest, Ytest, n_trials=20, device=device)
-    
+
 if __name__ == '__main__':
     start = time()
     main()

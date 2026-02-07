@@ -1,7 +1,11 @@
 import numpy as np
 from tqdm import tqdm
 import argparse
-import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from utils import *
+from metrics_tracker import MetricsTracker
 
 # load the seeds:
 seeds = np.load('seeds.npy')
@@ -9,25 +13,17 @@ seeds = np.load('seeds.npy')
 # select a seed:
 SEED = seeds[0] 
 
-import torch
+
 torch.manual_seed(SEED)
 
 if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-import torch.nn as nn
-import torch.nn.functional as F 
-import torch.optim as optim
 
-import numpy as np
-np.random.seed(SEED)
-
-from utils import *
-from metrics_tracker import MetricsTracker
 
 # Import the VN model
-from vn_pointnet_lite import VNPointNetLite
+from vn_pointnet_lite import VNPointNet
 
 
 def parse_args():
@@ -83,7 +79,7 @@ def build_model(args, output_dim):
     """Build the specified model."""
     
     if args.model == 'vn_pointnet_lite':
-        model = VNPointNetLite(
+        model = VNPointNet(
             num_classes=output_dim,
             base_channels=args.base_channels,
             n_knn=args.n_knn,
@@ -255,11 +251,11 @@ def main():
     
     all_metrics = {}
     
+    
     # 1) PointNet++
     if args.train_baseline:
         model_name = "PointNet++"
-        model = build_point_net_pp(output_dim=output_dim, activation=nn.functional.relu, 
-                                   dropout=0.2, version=0)
+        model = build_point_net_pp(output_dim=output_dim)
         metrics = train_model(
             model_name=model_name, 
             data_type=data_type, 
@@ -274,6 +270,7 @@ def main():
         )
         all_metrics['PointNet++'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
+      
         
     # 2) CGA-PointNet++
     if args.train_geom:
@@ -294,10 +291,11 @@ def main():
         all_metrics['CGAPointNet++'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
         
+        
     # 3) VN-PointNet (Lite version)
     if args.train_vn:
-        model_name = "VNPointNet_Lite"
-        model = VNPointNetLite(
+        model_name = "VNPointNet"
+        model = VNPointNet(
             num_classes=output_dim,
             base_channels=args.base_channels,
             n_knn=args.n_knn,
@@ -324,7 +322,7 @@ def main():
         model_name = "MLGP"
         
         # MLGP needs smaller point clouds - subsample
-        n_pts = 1024
+        n_pts = 256
         Xtrain_mlgp = Xtrain[:, :n_pts, :]
         Xval_mlgp = Xval[:, :n_pts, :]
         
@@ -349,6 +347,7 @@ def main():
         all_metrics['MLGP'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
     
+    
     # Comparative plots if multiple models trained
     if len(all_metrics) > 1:
         import matplotlib.pyplot as plt
@@ -368,6 +367,7 @@ def main():
         ax.grid(True, linestyle='--', alpha=0.7)
         ax.set_title('Comparative Accuracy')
         fig.savefig(f'Comparative_accuracy_{data_type}.pdf', bbox_inches='tight')
+
 
 
 if __name__ == '__main__':

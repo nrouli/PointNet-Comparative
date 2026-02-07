@@ -259,7 +259,7 @@ class PointNetPP(nn.Module):
         
         # Hierarchical set abstraction layers
         self.sa1 = SetAbstraction(
-            n_centroids=256, n_neighbors=32,
+            n_centroids=256, n_neighbors=16,
             in_dim=3, hidden_layer_size=[512, 256, 128])
         
         self.sa2 = SetAbstraction(
@@ -377,7 +377,7 @@ class CGASetAbstraction(nn.Module):
             return points[batch_idx, idx]
         else:
             raise ValueError(f"idx must have dim 2 or 3, got {idx.dim()}")
-
+    
     def knn_wrapper(self, xyz, centroids, k):
         B, N, _ = xyz.shape
         _, M, _ = centroids.shape
