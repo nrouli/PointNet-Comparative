@@ -6,7 +6,8 @@ import numpy as np
 import random
 from torch_geometric.datasets import ModelNet
 import torch_geometric.transforms as T
-from models import PointNetPP, CGAPointNetPP, PointCMLP
+from models import PointNetPP, PointCMLP, PointNet, CGAPointNetPP
+
 
 EPSILON = 1e-8
 
@@ -20,6 +21,18 @@ def build_mlgp(input_shape=(4, 3), output_dim=10, hidden_layer_sizes=[4], bias=F
     # Multilayer Geometric Perceptron
     print('\nmodel: MLGP')
     model = PointCMLP(input_shape, output_dim, hidden_layer_sizes, activation, bias, version=1)
+    return model
+
+def build_point_net_mlp(output_dim=10, hidden_layer_sizes=[4], bias=True, activation=nn.functional.relu):
+    # Multilayer Geometric Perceptron
+    print('\nmodel: PointNet')
+    model = PointNet(out_dim=output_dim, hidden_layer_sizes=hidden_layer_sizes, activation=activation, bias=bias, version=0)
+    return model
+
+def build_point_net_mlgp(output_dim=10, hidden_layer_sizes=[4], bias=False, activation=identity):
+    # Multilayer Geometric Perceptron
+    print('\nmodel: CGA-PointNet')
+    model = PointNet(out_dim=output_dim, hidden_layer_sizes=hidden_layer_sizes, activation=activation, bias=bias, version=1)
     return model
 
 

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import fps, knn
-
+import torch.nn.init as init
 import numpy as np
 
 eps = 1e-8
@@ -29,7 +29,7 @@ class PointCMLP(nn.Module):
 
         self.input_shape = input_shape
         self.f = activation
-        
+        self.version = version
         # create hidden layers:
         hidden_layers = []
 
@@ -77,6 +77,22 @@ class PointCMLP(nn.Module):
                 self.out_layer = nn.Linear(M1, output_dim, bias=bias)   
 
             self.forward = self.forward_1
+            self._initialize_weights()
+            
+        
+    def _initialize_weights(self):
+        if self.version == 0:
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    init.kaiming_normal_(m.weight, nonlinearity='relu')
+            
+        else:
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    init.orthogonal_(m.weight, gain=1.0)
+                    
+        if m.bias is not None:
+            init.constant_(m.bias, 0)
                         
         
     def forward_0(self, x):
@@ -120,6 +136,62 @@ class PointCMLP(nn.Module):
         return x
     
     
+class PointNet(nn.Module):
+    
+    def __init__(self, out_dim, hidden_layer_sizes=[], activation=lambda x:x, bias=False, version=0):
+        super().__init__()
+        self.point_mlp = PointCMLP(input_shape=(1,3),
+                             output_dim=hidden_layer_sizes[-1],
+                             hidden_layer_sizes=hidden_layer_sizes[:-1],
+                             activation=activation,
+                             bias=bias,
+                             version=version)
+        
+        self.version = version
+        self.fc = nn.Linear(hidden_layer_sizes[-1], out_dim)
+        self._initialize_weights()
+        
+    
+    def _initialize_weights(self):
+        
+        if self.version == 0:
+            for m in self.fc.modules():
+                if isinstance(m, nn.Linear):
+                    init.kaiming_normal_(m.weight, nonlinearity='relu')
+            
+        else:
+            for m in self.fc.modules():
+                if isinstance(m, nn.Linear):
+                    init.orthogonal_(m.weight, gain=1.0)
+        
+        if self.fc.bias is not None:
+            init.constant_(self.fc.bias, 0)
+            
+    def lse_pool(self, x, dim, tau=10.0):
+        """
+        Log-Sum-Exp pooling along dimension `dim`.
+        """
+        # subtract max for numerical stability
+        x_max, _ = x.max(dim=dim, keepdim=True)
+        lse = x_max + (1.0 / tau) * torch.log(
+            torch.sum(torch.exp(tau * (x - x_max)), dim=dim, keepdim=True)
+        )
+        return lse
+                
+           
+    def forward(self, x):
+        B, N, _ = x.shape
+        
+        x = x.reshape(B*N, 1, 3)
+        x = self.point_mlp(x)
+        
+        x = x.reshape(B, N,-1)
+        
+        x = x.max(dim=1)[0]
+        x = self.fc(x)
+        return x
+    
+    
 
 class SetAbstraction(nn.Module):
     """
@@ -155,7 +227,18 @@ class SetAbstraction(nn.Module):
             
         self.mlp = nn.Sequential(*layers)
         self.out_dim = hidden_layer_size[-1]
-
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                init.kaiming_normal_(m.weight, nonlinearity='relu')
+            elif isinstance(m, nn.Conv2d):
+                init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
         
     def gather_points(self, points, idx):
         """
@@ -241,7 +324,8 @@ class SetAbstraction(nn.Module):
         grouped_features = grouped_features.permute(0, 3, 1, 2).contiguous()
         grouped_features = self.mlp(grouped_features)
     
-        x = self.lse_pool(grouped_features, dim=3, tau=10).squeeze(3)
+        x = torch.max(grouped_features, dim=3).values
+        
         x = x.permute(0, 2, 1).contiguous()   
         return centroids, x
 
@@ -259,37 +343,49 @@ class PointNetPP(nn.Module):
         
         # Hierarchical set abstraction layers
         self.sa1 = SetAbstraction(
-            n_centroids=256, n_neighbors=16,
-            in_dim=3, hidden_layer_size=[512, 256, 128])
+            n_centroids=256, n_neighbors=64,
+            in_dim=3, hidden_layer_size=[64, 64, 128, 128])
         
         self.sa2 = SetAbstraction(
-            n_centroids=64, n_neighbors=16,
-            in_dim=128 + 3, hidden_layer_size=[128, 64])
-        
-        self.sa3 = SetAbstraction(
-            n_centroids=1, n_neighbors=32 ,
-            in_dim=64 + 3, hidden_layer_size=[64, 64])
+            n_centroids=64, n_neighbors=32,
+            in_dim=128 + 3, hidden_layer_size=[256, 256])
         
         # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(64, 32, bias=False),  # bias is set to false here because batch normalization follows
+            nn.Linear(256, 180, bias=False),
+            nn.BatchNorm1d(180),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(180, 64, bias=False), 
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, 32, bias=False), 
             nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(32, 16, bias=False),  # bias is set to false here because batch normalization follows
-            nn.BatchNorm1d(16),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(16, out_dim)
+            nn.Linear(32, out_dim)
         )
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        for m in self.classifier.modules():
+            if isinstance(m, nn.Linear):
+                init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+                    
+            elif isinstance(m, nn.BatchNorm1d):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
     
     def forward(self, xyz):
         # xyz: (B, N, 3)
         xyz1, feat1 = self.sa1(xyz, None)
-        xyz2, feat2 = self.sa2(xyz1, feat1)
-        _, feat3 = self.sa3(xyz2, feat2)
+        _, feat2 = self.sa2(xyz1, feat1)
+        
        
-        x = feat3.squeeze(1) 
+        x = feat2.max(dim=1)[0]
         return self.classifier(x)
     
     
@@ -315,6 +411,7 @@ class CGASetAbstraction(nn.Module):
         activation: Activation function for the geometric MLP. The
             feature MLP always uses ReLU.
     """
+    
     
     def __init__(
         self,
@@ -366,6 +463,8 @@ class CGASetAbstraction(nn.Module):
 
         self.out_dim = self.geo_out_dim + self.feat_out_dim
 
+
+
     def gather_points(self, points, idx):
         B = points.shape[0]
         if idx.dim() == 2:
@@ -377,6 +476,8 @@ class CGASetAbstraction(nn.Module):
             return points[batch_idx, idx]
         else:
             raise ValueError(f"idx must have dim 2 or 3, got {idx.dim()}")
+    
+    
     
     def knn_wrapper(self, xyz, centroids, k):
         B, N, _ = xyz.shape
@@ -395,6 +496,8 @@ class CGASetAbstraction(nn.Module):
         nn_flat = edge_index[1].view(B, M, k)
         idx = nn_flat % N
         return idx
+
+
 
     def forward(self, xyz, features):
         B, N, _ = xyz.shape
@@ -445,7 +548,7 @@ class CGAPointNetPP(nn.Module):
             n_centroids=256,
             n_neighbors=64,
             feat_dim=0,
-            geo_hidden=[32],
+            geo_hidden=[64],
             activation=activation,
         )
         
@@ -453,26 +556,43 @@ class CGAPointNetPP(nn.Module):
             n_centroids=64,
             n_neighbors=32,
             feat_dim=self.sa1.out_dim,
-            geo_hidden=[32],
-            feat_hidden=[128, 64],
+            geo_hidden=[62],
+            feat_hidden=[64, 64],
             activation=activation,
         )
 
         self.final_geo = PointCMLP(
             input_shape=(self.sa2.n_centroids, 3),
-            output_dim=128,
-            hidden_layer_sizes=[16],
+            output_dim=64,
+            hidden_layer_sizes=[64],
             activation=activation,
             bias=False,
             version=1,
         )
         
         self.final_feat = nn.Sequential(
-            nn.Linear(self.sa2.out_dim, 128),
+            nn.Linear(self.sa2.out_dim, 64),
             nn.ReLU(),
-            nn.Linear(128, 256))
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32))
 
-        self.classifier = nn.Linear(128 + 256, out_dim, bias=True)
+        self.classifier = nn.Linear(32 + 64, out_dim, bias=True)
+        self._initialize_weights()
+        
+    
+    
+    def _initialize_weights(self):
+        for m in self.final_feat.modules():
+            if isinstance(m, nn.Linear):
+                init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+
+        init.kaiming_normal_(self.classifier.weight, nonlinearity='relu')
+        init.constant_(self.classifier.bias, 0)
+
+
 
     def forward(self, xyz):
         xyz1, feat1 = self.sa1(xyz, None)
@@ -485,4 +605,4 @@ class CGAPointNetPP(nn.Module):
         x = torch.cat([x_geo, x_feat], dim=-1)
         
         return self.classifier(x)
-        
+    

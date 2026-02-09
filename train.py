@@ -30,17 +30,13 @@ def parse_args():
     '''PARAMETERS'''
     parser = argparse.ArgumentParser('PointNet Training')
     
-    # Model selection
-    parser.add_argument('--model', default='vn_pointnet_lite', 
-                    choices=['pointnet_pp', 'cga_pointnet_pp', 'vn_pointnet_lite', 'vn_pointnet_orig', 'mlgp'],
-                    help='Model to train')
-    
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--epochs', type=int, default=150, help='Number of epochs')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
     parser.add_argument('--step', type=int, default=10, help='Logging interval')
+    parser.add_argument('--rotate_data', action='store_true', help="Randomly rotate data during training")
     
     # Data parameters
     parser.add_argument('--num_points', type=int, default=1024, help='Number of points')
@@ -54,11 +50,6 @@ def parse_args():
     parser.add_argument('--pooling', type=str, default='mean', choices=['mean', 'max'],
                         help='Pooling method for VN layers')
     
-    # Original VN model parameters (if using vn_pointnet_orig)
-    parser.add_argument('--rot', type=str, default='aligned', choices=['aligned', 'z', 'so3'],
-                        help='Rotation augmentation')
-    parser.add_argument('--normal', action='store_true', default=False, 
-                        help='Use normal information')
     
     # MLGP Parameters
     parser.add_argument('--mlgp_points', type=int, default=4, 
@@ -71,57 +62,15 @@ def parse_args():
     parser.add_argument('--train_geom', action='store_true', help='Train CGA-PointNet++')
     parser.add_argument('--train_vn', action='store_true', help='Train VN-PointNet')
     parser.add_argument('--train_mlgp', action='store_true', help='Train MLGP')
+    parser.add_argument('--train_pn', action='store_true', help= 'Train PointNet with PointCMLP version 0 (MLP)')
+    parser.add_argument('--train_cpn', action='store_true', help='Train PointNet with PointCMLP version 1 (MLGP)')
     
     return parser.parse_args()
 
 
-def build_model(args, output_dim):
-    """Build the specified model."""
-    
-    if args.model == 'vn_pointnet_lite':
-        model = VNPointNet(
-            num_classes=output_dim,
-            base_channels=args.base_channels,
-            n_knn=args.n_knn,
-            pooling=args.pooling
-        )
-        
-    elif args.model == 'vn_pointnet_orig':
-        # Use original VN model (requires vn_pointnet_cls.py)
-        from vn_pointnet_cls import get_vn_model as OriginalVNModel
-        
-        # Create a wrapper that handles the output format
-        class VNModelWrapper(nn.Module):
-            def __init__(self, vn_model):
-                super().__init__()
-                self.model = vn_model
-                
-            def forward(self, x):
-                # Handle input shape: (B, N, 3) -> (B, 3, N)
-                if x.size(1) != 3 and x.size(2) == 3:
-                    x = x.transpose(1, 2)
-                    
-                out, _ = self.model(x)  # Unpack (logits, trans_feat)
-                
-                return torch.exp(out)
-                
-        model = VNModelWrapper(OriginalVNModel(args, num_class=output_dim, normal_channel=False))
-        
-    elif args.model == 'pointnet_pp':
-        model = build_point_net_pp(output_dim=output_dim, activation=nn.functional.relu, 
-                                   dropout=0.2, version=0)
-        
-    elif args.model == 'cga_pointnet_pp':
-        model = build_cgapoint_net_pp(output_dim=output_dim)
-        
-    else:
-        raise ValueError(f"Unknown model: {args.model}")
-    
-    return model
-
 
 def train_model(model_name: str, data_type: str, model, train_data, validation_data, 
-                epochs, step, batch_size=128, lr=1e-3, weight_decay=1e-4):
+                rotate=False, epochs=30, step=1, batch_size=128, lr=1e-3, weight_decay=1e-4):
     
     Xtrain, Ytrain = train_data
     Xval, Yval = validation_data
@@ -158,6 +107,11 @@ def train_model(model_name: str, data_type: str, model, train_data, validation_d
             Xbatch = Xtrain[j*batch_size:(j+1)*batch_size]
             Ybatch = Ytrain[j*batch_size:(j+1)*batch_size]
 
+            if rotate:
+                Rs = torch.stack([torch.tensor(random_rotation_matrix(0, 1), dtype=Xbatch.dtype) for _ in range(len(Xbatch))])
+                Rs = Rs.cuda() if torch.cuda.is_available() else Rs
+                Xbatch = torch.bmm(Xbatch, Rs)
+            
             y_pred = model(Xbatch)
             loss = criterion(y_pred, Ybatch)
 
@@ -252,6 +206,48 @@ def main():
     all_metrics = {}
     
     
+    
+    # 2) PointNet mlp
+    if args.train_pn:
+        model_name = "PointNet"
+        model = build_point_net_mlp(output_dim=output_dim, hidden_layer_sizes=[64, 64, 256, 128, 32] , activation=nn.functional.relu, bias=True)
+        metrics = train_model(
+            model_name=model_name, 
+            data_type=data_type, 
+            model=model, 
+            train_data=(Xtrain, Ytrain), 
+            validation_data=(Xval, Yval),
+            rotate=args.rotate_data,
+            epochs=args.epochs, 
+            step=args.step, 
+            batch_size=args.batch_size,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay
+        )
+        all_metrics['PointNet'] = metrics
+        plot_metrics(model_name + '_' + data_type, metrics)
+    
+    
+    if args.train_cpn:
+        model_name = "CGPointNet"
+        model = build_point_net_mlgp(output_dim=output_dim, hidden_layer_sizes=[62, 62, 254, 128, 32],  activation=identity, bias=False)
+        metrics = train_model(
+            model_name=model_name, 
+            data_type=data_type, 
+            model=model, 
+            train_data=(Xtrain, Ytrain), 
+            validation_data=(Xval, Yval),
+            rotate=args.rotate_data,
+            epochs=args.epochs, 
+            step=args.step, 
+            batch_size=args.batch_size,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay
+        )
+        all_metrics['PointNet'] = metrics
+        plot_metrics(model_name + '_' + data_type, metrics)
+        
+        
     # 1) PointNet++
     if args.train_baseline:
         model_name = "PointNet++"
@@ -261,7 +257,8 @@ def main():
             data_type=data_type, 
             model=model, 
             train_data=(Xtrain, Ytrain), 
-            validation_data=(Xval, Yval), 
+            validation_data=(Xval, Yval),
+            rotate=args.rotate_data,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
@@ -271,7 +268,7 @@ def main():
         all_metrics['PointNet++'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
       
-        
+
     # 2) CGA-PointNet++
     if args.train_geom:
         model_name = "CGAPointNet++"
@@ -281,7 +278,8 @@ def main():
             data_type=data_type, 
             model=model, 
             train_data=(Xtrain, Ytrain), 
-            validation_data=(Xval, Yval), 
+            validation_data=(Xval, Yval),
+            rotate=args.rotate_data,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
@@ -290,6 +288,8 @@ def main():
         )
         all_metrics['CGAPointNet++'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
+    
+    
         
         
     # 3) VN-PointNet (Lite version)
@@ -307,6 +307,7 @@ def main():
             model=model, 
             train_data=(Xtrain, Ytrain), 
             validation_data=(Xval, Yval), 
+            rotate=args.rotate_data,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
