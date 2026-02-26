@@ -1,5 +1,6 @@
 # Geometric Algebra Based Embeddings on Point Clouds
 
+The current is a modification of MLGP in a PointNet style architecture to assess the performance of the MLGP core in unordered sets of 3D points. ModelNet10 was used for this purpose.
 
 #### MLGP resource
 https://github.com/pavlo-melnyk/mlgp-embedme
