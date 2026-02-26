@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.optim as optim
 from utils import *
 from metrics_tracker import MetricsTracker
+import copy
+from vn_pointnet_lite import VNPointNet
 
 # load the seeds:
 seeds = np.load('seeds.npy')
@@ -19,11 +21,8 @@ torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-
-# Import the VN model
-from vn_pointnet_lite import VNPointNet
+    
+    
 
 
 def parse_args():
@@ -33,37 +32,25 @@ def parse_args():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--epochs', type=int, default=150, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
     parser.add_argument('--step', type=int, default=10, help='Logging interval')
-    parser.add_argument('--rotate_data', action='store_true', help="Randomly rotate data during training")
+    parser.add_argument('--rotate', action='store_true', help="Randomly rotate data during training")
     
     # Data parameters
     parser.add_argument('--num_points', type=int, default=1024, help='Number of points')
     parser.add_argument('--num_classes', type=int, default=10, help='Number of classes')
     parser.add_argument('--data_type', type=str, default='clean', help='Data variant name')
-    
-    # VN-specific parameters
-    parser.add_argument('--base_channels', type=int, default=12, 
-                        help='Base channel width for VN-PointNet Lite (8=~15K, 16=~35K, 24=~70K params)')
-    parser.add_argument('--n_knn', type=int, default=20, help='Number of KNN neighbors')
-    parser.add_argument('--pooling', type=str, default='mean', choices=['mean', 'max'],
-                        help='Pooling method for VN layers')
-    
-    
-    # MLGP Parameters
-    parser.add_argument('--mlgp_points', type=int, default=4, 
-                    help='Number of points for MLGP input (data will be subsampled)')
-    parser.add_argument('--mlgp_hidden', type=int, nargs='+', default=[20],
-                    help='Hidden layer sizes for MLGP')
+
     
     # Flags for which models to train
+    parser.add_argument('--train_all', action='store_true', help='Train all models')
     parser.add_argument('--train_baseline', action='store_true', help='Train PointNet++')
     parser.add_argument('--train_geom', action='store_true', help='Train CGA-PointNet++')
-    parser.add_argument('--train_vn', action='store_true', help='Train VN-PointNet')
-    parser.add_argument('--train_mlgp', action='store_true', help='Train MLGP')
     parser.add_argument('--train_pn', action='store_true', help= 'Train PointNet with PointCMLP version 0 (MLP)')
     parser.add_argument('--train_cpn', action='store_true', help='Train PointNet with PointCMLP version 1 (MLGP)')
+    parser.add_argument('--train_vn', action='store_true', help= 'Train VN-PointNet')
+   
     
     return parser.parse_args()
 
@@ -76,11 +63,12 @@ def train_model(model_name: str, data_type: str, model, train_data, validation_d
     Xval, Yval = validation_data
     
     best_val_loss = float('inf')
+    best_model_state = None  
+    best_epoch = 0
     patience = epochs - 2 * epochs // 4
     no_improve = 0
     
     torch.manual_seed(SEED)
-
     print(f"\n{'='*60}")
     print(f"Training: {model_name}")
     print(f"{'='*60}")
@@ -88,14 +76,12 @@ def train_model(model_name: str, data_type: str, model, train_data, validation_d
     n_params = sum([np.prod(p.size()) for p in filter(lambda p: p.requires_grad, model.parameters())])
     print(f'Total parameters: {n_params:,}')
     print()
-
     if torch.cuda.is_available():
         model = model.cuda()
         Xtrain, Ytrain = Xtrain.float().cuda(), Ytrain.cuda()
         Xval, Yval = Xval.float().cuda(), Yval.cuda()
-
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     n_batches = int(np.ceil(len(Xtrain) / batch_size))
     metrics = MetricsTracker(model_name + '_' + data_type)
@@ -106,19 +92,16 @@ def train_model(model_name: str, data_type: str, model, train_data, validation_d
         for j in tqdm(range(n_batches), desc=f"Epoch {i+1}/{epochs}"):          
             Xbatch = Xtrain[j*batch_size:(j+1)*batch_size]
             Ybatch = Ytrain[j*batch_size:(j+1)*batch_size]
-
             if rotate:
-                Rs = torch.stack([torch.tensor(random_rotation_matrix(0, 1), dtype=Xbatch.dtype) for _ in range(len(Xbatch))])
+                Rs = torch.stack([torch.tensor(uniform_random_rotation(), dtype=Xbatch.dtype) for _ in range(len(Xbatch))])
                 Rs = Rs.cuda() if torch.cuda.is_available() else Rs
                 Xbatch = torch.bmm(Xbatch, Rs)
             
             y_pred = model(Xbatch)
             loss = criterion(y_pred, Ybatch)
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
         if i % step == 0:
             with torch.no_grad():
                 loss, acc = evaluate(model, Xtrain, Ytrain, criterion)
@@ -127,28 +110,44 @@ def train_model(model_name: str, data_type: str, model, train_data, validation_d
             metrics.update(i, loss, val_loss, acc, val_acc)
             print(f'Epoch {i:3d} | Loss: {loss:.4f} | Val Loss: {val_loss:.4f} | '
                   f'Acc: {acc:.4f} | Val Acc: {val_acc:.4f}')
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_epoch = i
+                # Save best model state
+                best_model_state = {
+                    'epoch': i + 1,
+                    'state_dict': copy.deepcopy(model.state_dict()),
+                    'optimizer': optimizer.state_dict().copy(),
+                    'val_loss': val_loss,
+                    'val_acc': val_acc
+                }
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f'Early stopping at epoch {i}')
+                    break
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve = 0
-        else:
-            no_improve += 1
-            if no_improve >= patience:
-                print(f'Early stopping at epoch {i}')
-                break
-
+    
     metrics.save()
    
-    # Save the model
+    # Load best model state before saving
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state['state_dict'])
+        print(f"\nLoaded best model from epoch {best_epoch} (val_loss: {best_val_loss:.4f})")
+    
+    # Save the best model
     full_name = model_name + '_' + data_type
     save_checkpoint(
         save_dir='pretrained_models',
         state={
             'model': model,
             'name': full_name,
-            'epoch': i + 1,
+            'epoch': best_model_state['epoch'] if best_model_state else i + 1,
             'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
+            'optimizer': best_model_state['optimizer'] if best_model_state else optimizer.state_dict(),
+            'best_val_loss': best_val_loss,
             'seed': SEED,
         }
     )
@@ -193,7 +192,7 @@ def main():
     
     # Load data
     (Xtrain, Ytrain), (Xval, Yval) = get_model_net_data(
-        train_size=3991, 
+        train_size=3991,
         test_size=908, 
         n_points=1024,
         distortion=0.0,
@@ -207,17 +206,21 @@ def main():
     
     
     
-    # 2) PointNet mlp
-    if args.train_pn:
+    # PointNet mlp
+    if args.train_pn or args.train_all:
         model_name = "PointNet"
-        model = build_point_net_mlp(output_dim=output_dim, hidden_layer_sizes=[64, 64, 256, 128, 32] , activation=nn.functional.relu, bias=True)
+        
+        model = build_point_net_mlp(output_dim=output_dim, 
+                                    hidden_layer_sizes=[64, 64, 128, 64],
+                                    activation=nn.functional.gelu,
+                                    bias=True)
         metrics = train_model(
             model_name=model_name, 
             data_type=data_type, 
             model=model, 
             train_data=(Xtrain, Ytrain), 
             validation_data=(Xval, Yval),
-            rotate=args.rotate_data,
+            rotate=args.rotate,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
@@ -228,28 +231,31 @@ def main():
         plot_metrics(model_name + '_' + data_type, metrics)
     
     
-    if args.train_cpn:
+    if args.train_cpn or args.train_all:
         model_name = "CGPointNet"
-        model = build_point_net_mlgp(output_dim=output_dim, hidden_layer_sizes=[62, 62, 254, 128, 32],  activation=identity, bias=False)
+        model = build_point_net_mlgp(output_dim=output_dim,
+                                     hidden_layer_sizes=[64, 62, 126, 64],
+                                     activation=identity, 
+                                     bias=False)
         metrics = train_model(
             model_name=model_name, 
             data_type=data_type, 
             model=model, 
             train_data=(Xtrain, Ytrain), 
             validation_data=(Xval, Yval),
-            rotate=args.rotate_data,
+            rotate=args.rotate,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
             lr=args.learning_rate,
             weight_decay=args.weight_decay
         )
-        all_metrics['PointNet'] = metrics
+        all_metrics['CGPointNet'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
         
         
-    # 1) PointNet++
-    if args.train_baseline:
+    # PointNet++
+    if args.train_baseline or args.train_all:
         model_name = "PointNet++"
         model = build_point_net_pp(output_dim=output_dim)
         metrics = train_model(
@@ -258,7 +264,7 @@ def main():
             model=model, 
             train_data=(Xtrain, Ytrain), 
             validation_data=(Xval, Yval),
-            rotate=args.rotate_data,
+            rotate=args.rotate,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
@@ -269,8 +275,8 @@ def main():
         plot_metrics(model_name + '_' + data_type, metrics)
       
 
-    # 2) CGA-PointNet++
-    if args.train_geom:
+    # CGA-PointNet++
+    if args.train_geom or args.train_all:
         model_name = "CGAPointNet++"
         model = build_cgapoint_net_pp(output_dim=output_dim)
         metrics = train_model(
@@ -279,7 +285,7 @@ def main():
             model=model, 
             train_data=(Xtrain, Ytrain), 
             validation_data=(Xval, Yval),
-            rotate=args.rotate_data,
+            rotate=args.rotate,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
@@ -289,64 +295,25 @@ def main():
         all_metrics['CGAPointNet++'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
     
-    
-        
-        
-    # 3) VN-PointNet (Lite version)
-    if args.train_vn:
-        model_name = "VNPointNet"
-        model = VNPointNet(
-            num_classes=output_dim,
-            base_channels=args.base_channels,
-            n_knn=args.n_knn,
-            pooling=args.pooling
-        )
+    if args.train_vn or args.train_all:
+        model_name = "VN-PointNet"
+        model = build_vn_point_net(output_dim=output_dim, base_channels=8, n_knn=20)
         metrics = train_model(
             model_name=model_name, 
             data_type=data_type, 
             model=model, 
             train_data=(Xtrain, Ytrain), 
-            validation_data=(Xval, Yval), 
-            rotate=args.rotate_data,
+            validation_data=(Xval, Yval),
+            rotate=args.rotate,
             epochs=args.epochs, 
             step=args.step, 
             batch_size=args.batch_size,
             lr=args.learning_rate,
             weight_decay=args.weight_decay
         )
-        all_metrics['VNPointNet_Lite'] = metrics
+        all_metrics['VNPointNet'] = metrics
         plot_metrics(model_name + '_' + data_type, metrics)
         
-        
-    # 4) MLGP
-    if args.train_mlgp:
-        model_name = "MLGP"
-        
-        # MLGP needs smaller point clouds - subsample
-        n_pts = 256
-        Xtrain_mlgp = Xtrain[:, :n_pts, :]
-        Xval_mlgp = Xval[:, :n_pts, :]
-        
-        model = build_mlgp(
-            input_shape=(n_pts, 3),
-            output_dim=output_dim,
-            hidden_layer_sizes=[64, 64, 32],
-            bias=False,
-        )
-        metrics = train_model(
-            model_name=model_name, 
-            data_type=data_type, 
-            model=model, 
-            train_data=(Xtrain_mlgp, Ytrain), 
-            validation_data=(Xval_mlgp, Yval), 
-            epochs=args.epochs, 
-            step=args.step, 
-            batch_size=args.batch_size,
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay
-        )
-        all_metrics['MLGP'] = metrics
-        plot_metrics(model_name + '_' + data_type, metrics)
     
     
     # Comparative plots if multiple models trained

@@ -250,7 +250,7 @@ class VNPointNet(nn.Module):
     
     Args:
         num_classes: Number of output classes
-        base_channels: Base channel width (default 16 gives ~35K params)
+        base_channels: Base channel width
         n_knn: Number of neighbors for graph construction
         pooling: 'mean' or 'max' for VN pooling
     """

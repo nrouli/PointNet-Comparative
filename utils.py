@@ -7,6 +7,9 @@ import random
 from torch_geometric.datasets import ModelNet
 import torch_geometric.transforms as T
 from models import PointNetPP, PointCMLP, PointNet, CGAPointNetPP
+from equivariant_models import InvariantPointNetPP, InvariantCGAPointNetPP
+from vn_pointnet_lite import VNPointNet
+from scipy.spatial.transform import Rotation
 
 
 EPSILON = 1e-8
@@ -17,7 +20,14 @@ def identity(x):
     return x
 
 
-def build_mlgp(input_shape=(4, 3), output_dim=10, hidden_layer_sizes=[4], bias=False, activation=identity):
+def build_mlp(input_shape=(128, 3), output_dim=10, hidden_layer_sizes=[128, 128, 64, 32], bias=True, activation=nn.functional.gelu):
+    # Multilayer Perceptron
+    print('\nmodel: MLP')
+    model = PointCMLP(input_shape, output_dim, hidden_layer_sizes, activation, bias, version=0)
+    return model
+
+
+def build_mlgp(input_shape=(128, 3), output_dim=10, hidden_layer_sizes=[126, 126, 62, 30], bias=False, activation=identity):
     # Multilayer Geometric Perceptron
     print('\nmodel: MLGP')
     model = PointCMLP(input_shape, output_dim, hidden_layer_sizes, activation, bias, version=1)
@@ -31,8 +41,14 @@ def build_point_net_mlp(output_dim=10, hidden_layer_sizes=[4], bias=True, activa
 
 def build_point_net_mlgp(output_dim=10, hidden_layer_sizes=[4], bias=False, activation=identity):
     # Multilayer Geometric Perceptron
-    print('\nmodel: CGA-PointNet')
+    print('\nmodel: C-PointNet')
     model = PointNet(out_dim=output_dim, hidden_layer_sizes=hidden_layer_sizes, activation=activation, bias=bias, version=1)
+    return model
+
+def build_vn_point_net(output_dim=10,base_channels=16, n_knn=20):
+    # Multilayer Geometric Perceptron
+    print('\nmodel: VN-PointNet')
+    model = VNPointNet(num_classes=output_dim, base_channels=base_channels, n_knn=n_knn, pooling='max')
     return model
 
 
@@ -44,10 +60,18 @@ def build_point_net_pp(output_dim=10):
 
 
 def build_cgapoint_net_pp(output_dim=10, activation=identity):
-    print('\nmodel: PointNet++')
+    print('\nmodel: C-PointNet++')
     model = CGAPointNetPP(output_dim, activation)
     return model
 
+def build_inv_point_net_pp(output_dim=10):
+    model = InvariantPointNetPP(output_dim)
+    return model
+
+
+def build_inv_cga_point_net_pp(output_dim=10, activation=identity):
+    model = InvariantCGAPointNetPP(output_dim,activation=activation)
+    return model
 
 
 def score(y, t):
@@ -57,6 +81,20 @@ def score(y, t):
 
 def save_checkpoint(state, save_dir='pretrained_models'):
     torch.save(state, save_dir+'/'+state['name']+'.tar')
+
+
+
+def uniform_random_rotation():
+    """Sample a rotation matrix uniformly from SO(3) via unit quaternions.
+    
+    Sampling a 4D Gaussian and normalizing yields a uniform distribution 
+    over S³, which double-covers SO(3).
+    """
+    q = np.random.randn(4)
+    q = q / np.linalg.norm(q)
+    # scipy expects [x, y, z, w] convention
+    return Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+
 
 
 
@@ -111,7 +149,7 @@ def get_model_net_data(train_size=3991, test_size=908,
     transform = T.Compose(transform) if transform else None
 
     train_dataset = ModelNet(root=root, name='10', train=True, pre_transform=pre_transform, transform=transform, force_reload=force_reload)
-    test_dataset = ModelNet(root=root, name='10', train=False, pre_transform=pre_transform, transform=None, force_reload=force_reload)
+    test_dataset = ModelNet(root=root, name='10', train=False, pre_transform=pre_transform, transform=transform, force_reload=force_reload)
 
     train_dataset = [data for data in train_dataset if data.y.item() in range(class_size)]
     test_dataset = [data for data in test_dataset if data.y.item() in range(class_size)]

@@ -8,8 +8,9 @@ from tqdm import tqdm
 import argparse
 
 
+
 # ModelNet10 class names
-CLASS_NAMES = ["bathtub", " bed", "chair", "desk", "dresser", "monitor", "night stand", "sofa", "table", "toilet"]
+CLASS_NAMES = ["bathtub", "bed", "chair", "desk", "dresser", "monitor", "night stand", "sofa", "table", "toilet"]
 
 
 def parse_args():
@@ -25,9 +26,10 @@ def parse_args():
     
     parser.add_argument('--test_pn', action='store_true', help='Test the accuracy of PointNet under rotations')
     parser.add_argument('--test_cpn', action='store_true', help='Test the accuracy of CGPointNet under rotations')
+    parser.add_argument('--test_vn', action='store_true', help='Test the accuracy of VN-PointNet under rotations')
     parser.add_argument('--test_baseline', action='store_true', help='Test the accuracy of PointNet++ under rotations')
     parser.add_argument('--test_geom', action='store_true', help='Test the accuracy of CGA-PointNet++ under rotations')
-    parser.add_argument('--test_vn', action='store_true', help='Test the accuracy of VN-PointNet under rotations')
+    parser.add_argument('--test_all', action='store_true', help='Test the accuracy of all models')
 
     
     return parser.parse_args()
@@ -41,9 +43,11 @@ def rotation_matrix_axis(axis, theta):
     elif axis == 'y':
         return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
     elif axis == 'z':
-        return np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
     else:
         raise ValueError(f"Unknown axis: {axis}")
+    
+
     
 def batched_score(model, X, Y, batch_size=128, device='cpu'):
     """Evaluate the score in batches
@@ -66,7 +70,7 @@ def batched_score(model, X, Y, batch_size=128, device='cpu'):
     class_correct = np.zeros(10)
     class_total = np.zeros(10)
 
-    with torch.no_grad():
+    with torch.no_grad(): 
         for i in range(0, len(X), batch_size):
             X_batch = X[i:i+batch_size].to(device)
             Y_batch = Y[i:i+batch_size].to(device)
@@ -125,7 +129,7 @@ def evaluate_rotation(model, Xtest, Ytest, n_trials=10, batch_size=128,  device=
         'x-axis': lambda: rotation_matrix_axis('x', np.random.uniform(0, 2*np.pi)),
         'y-axis': lambda: rotation_matrix_axis('y', np.random.uniform(0, 2*np.pi)),
         'z-axis': lambda: rotation_matrix_axis('z', np.random.uniform(0, 2*np.pi)),
-        'arbitrary': lambda: random_rotation_matrix(0, 1),
+        'arbitrary': lambda: uniform_random_rotation(),
     }
     
     results = {}
@@ -208,37 +212,37 @@ def main():
     
     args = parse_args()
     
-    if args.test_pn:
-        MODEL_PATH = 'pretrained_models/PointNet_clean.tar'
+    if args.test_pn or args.test_all:
+        MODEL_PATH = 'pretrained_models/PointNet_canonical.tar'
         test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-        MODEL_PATH = 'pretrained_models/PointNet_rotated.tar'
-        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-    
-    if args.test_cpn:
-        MODEL_PATH = 'pretrained_models/CGPointNet_clean.tar'
-        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-        MODEL_PATH = 'pretrained_models/CGPointNet_rotated.tar'
+        MODEL_PATH = 'pretrained_models/PointNet_augmented.tar'
         test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
     
-    
-    if args.test_baseline:
-        MODEL_PATH = 'pretrained_models/PointNet++_clean.tar'
+    if args.test_cpn or args.test_all :
+        MODEL_PATH = 'pretrained_models/CGPointNet_canonical.tar'
         test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-        MODEL_PATH = 'pretrained_models/PointNet++_rotated.tar'
-        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-    
-    if args.test_geom:
-        MODEL_PATH = 'pretrained_models/CGAPointNet++_clean.tar'
-        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
-        MODEL_PATH = 'pretrained_models/CGAPointNet++_rotated.tar'
+        MODEL_PATH = 'pretrained_models/CGPointNet_augmented.tar'
         test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
     
-    if args.test_vn:
-        MODEL_PATH = 'pretrained_models/VNPointNet_Lite_clean.tar'
+    
+    if args.test_baseline or args.test_all:
+        MODEL_PATH = 'pretrained_models/PointNet++_canonical.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+        MODEL_PATH = 'pretrained_models/PointNet++_augmented.tar'
         test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
     
+    if args.test_geom or args.test_all:
+        MODEL_PATH = 'pretrained_models/CGAPointNet++_canonical.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+        MODEL_PATH = 'pretrained_models/CGAPointNet++_augmented.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+        
+        
+    if args.test_vn or args.test_all:
+        MODEL_PATH = 'pretrained_models/VN-PointNet_canonical.tar'
+        test_model(MODEL_PATH, Xtest, Ytest, n_trials=args.trials, batch_size=args.batch_size)
+        
 
-    
 
 if __name__ == '__main__':
     start = time()
