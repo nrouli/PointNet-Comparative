@@ -37,7 +37,7 @@ class PointCMLP(nn.Module):
             M1 = np.prod(input_shape)
             for M2 in hidden_layer_sizes:
                 layer = nn.Linear(M1, M2, bias=bias)
-                hidden_layers.append(layer)
+                hidden_layers.append(nn.Sequential(layer, nn.LayerNorm(M2)))
                 M1 = M2
 
             self.hidden_layers = nn.ModuleList(hidden_layers)
@@ -64,7 +64,7 @@ class PointCMLP(nn.Module):
             M1 = input_shape[0] * (input_shape[1] + 2)
             for M2 in hidden_layer_sizes:
                 layer = nn.Linear(M1, M2, bias=bias)
-                hidden_layers.append(layer)
+                hidden_layers.append(nn.Sequential(layer, nn.LayerNorm(M2)))
                 M1 = M2 + 2
 
             self.hidden_layers = nn.ModuleList(hidden_layers)
@@ -76,7 +76,8 @@ class PointCMLP(nn.Module):
                 self.out_layer = nn.Linear(M1, output_dim, bias=bias)   
 
             self.forward = self.forward_1
-            self._initialize_weights()
+        
+        self._initialize_weights()
             
     # initialization did not exist in the original implementation    
     def _initialize_weights(self):
@@ -301,154 +302,61 @@ class SetAbstraction(nn.Module):
 
 class PointNetPP(nn.Module):
     """
-    Vanilla PointNet++ classifier for 3D point cloud classification.
+    PointNet++ classifier for 3D point cloud classification.
+    Supports both vanilla and CGA-augmented modes.
 
     Args:
         out_dim: Number of output classes.
+        cga: If True, use CGA geometric MLPs (version=1, no bias, hidden=62).
+        activation: Activation function for the MLPs.
     """
     
-    def __init__(self, out_dim=10, activation=lambda x:x, bias=True, version=0):
+    def __init__(self, out_dim=10, cga=False, activation=lambda x: x):
         super().__init__()
+        
+        if cga:
+            hidden, bias, version = [62, 64], False, 1
+            sa_activation = activation
+        else:
+            hidden, bias, version = [64, 64], True, 0
+            sa_activation = activation
         
         # Hierarchical set abstraction layers
         self.sa1 = SetAbstraction(
-            n_centroids=256, n_neighbors=64,
-            in_dim=3, hidden_layer_size=[64, 64], activation=activation, bias=bias, version=version)
+            n_centroids=256, n_neighbors=32,
+            in_dim=3, hidden_layer_size=hidden,
+            activation=sa_activation if cga else nn.functional.gelu,
+            bias=bias if cga else True,
+            version=version if cga else 0)
         
         self.sa2 = SetAbstraction(
             n_centroids=64, n_neighbors=32,
-            in_dim=64 + 3, hidden_layer_size=[64, 64], activation=nn.functional.gelu, bias=True, version=0)
+            in_dim=64 + 3, hidden_layer_size=hidden if cga else [64, 64],
+            activation=sa_activation if cga else nn.functional.gelu,
+            bias=bias if cga else True,
+            version=version if cga else 0)
         
         self.sa3 = SetAbstraction(
             n_centroids=1, n_neighbors=64,
-            in_dim=64 + 3, hidden_layer_size=[64, 64], activation=nn.functional.gelu, bias=True, version=0)
+            in_dim=64 + 3, hidden_layer_size=hidden if cga else [64, 64],
+            activation=sa_activation if cga else nn.functional.gelu,
+            bias=bias if cga else True,
+            version=version if cga else 0)
         
+        self.classifier = PointCMLP(input_shape=(1, self.sa3.out_dim), output_dim=out_dim, hidden_layer_sizes=[32], activation=activation, bias=bias, version=version)
         
-        self.classifier = nn.Sequential(
-            nn.Linear(64, 32, bias=False),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, out_dim)
-        )
-        self._initialize_weights()
+    #     self._initialize_weights()
         
-    def _initialize_weights(self):
-        for m in self.classifier.modules():
-            if isinstance(m, nn.Linear):
-                init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, nn.BatchNorm1d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
+    # def _initialize_weights(self):
+    #     for m in self.classifier.modules():
+    #         if isinstance(m, nn.Linear):
+    #             init.kaiming_normal_(m.weight)
+    #             if m.bias is not None:
+    #                 init.constant_(m.bias, 0)
     
     def forward(self, xyz):
-        # xyz: (B, N, 3)
         xyz1, feat1 = self.sa1(xyz, None)
         xyz2, feat2 = self.sa2(xyz1, feat1)
         _, feat3 = self.sa3(xyz2, feat2)
-       
-        x = feat3.squeeze(1)
-        return self.classifier(x)
-    
-
-class CGAPointNetPP(nn.Module):
-    """
-    CGA-augmented PointNet++ classifier for 3D point cloud classification.
-    """
-    def __init__(self, out_dim=10, activation=lambda x: x):
-        """
-        Args:
-        out_dim: Number of output classes.
-        activation: Activation function for the CGA geometric MLPs.
-        """
-        
-        super().__init__()
-        # Hierarchical set abstraction layers
-        self.sa1 = SetAbstraction(
-            n_centroids=256, n_neighbors=64,
-            in_dim=3, hidden_layer_size=[62, 64], activation=activation, bias=False, version=1)
-        
-        self.sa2 = SetAbstraction(
-            n_centroids=64, n_neighbors=32,
-            in_dim=64 + 3, hidden_layer_size=[62, 64], activation=activation, bias=False, version=1)
-        
-        self.sa3 = SetAbstraction(
-            n_centroids=1, n_neighbors=64,
-            in_dim=64 + 3, hidden_layer_size=[62, 64], activation=activation, bias=False, version=1)
-        
-        # Classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(64, 32, bias=False),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, out_dim)
-        )
-        self._initialize_weights()
-        
-    def _initialize_weights(self):
-        for m in self.classifier.modules():
-            if isinstance(m, nn.Linear):
-                init.kaiming_normal_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-                    
-            elif isinstance(m, nn.BatchNorm1d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
-    
-    def forward(self, xyz):
-        # xyz: (B, N, 3)
-        xyz1, feat1 = self.sa1(xyz, None)
-        xyz2, feat2 = self.sa2(xyz1, feat1) 
-        _, feat3 = self.sa3(xyz2, feat2)
-       
-        x = feat3.squeeze(1)
-        return self.classifier(x)
-    
-    
-    
-# ── Quick smoke test ─────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    B, N = 4, 1024
-    xyz = torch.randn(B, N, 3, device=device)
-
-    # Random rotation matrix
-    from scipy.spatial.transform import Rotation
-    R_np = Rotation.random().as_matrix()
-    R = torch.tensor(R_np, dtype=torch.float32, device=device)
-    xyz_rot = xyz @ R.T  # rotate all points
-
-    print("=" * 60)
-    print("Smoke test: verifying rotation invariance")
-    print("=" * 60)
-
-    for name, Model, kwargs in [
-        ("CGAPointNetPP", PointNet, {"out_dim": 10}),
-        ("PointNetPP",    PointNetPP,    {"out_dim": 10}),
-        ("CGAPointNetPP", CGAPointNetPP, {"out_dim": 10}),
-        ("PointNetPP",    PointNetPP,    {"out_dim": 10}),
-    ]:
-        model = Model(**kwargs).to(device).eval()
-        with torch.no_grad():
-            # Note: FPS is stochastic, so we seed for reproducibility
-            torch.manual_seed(42)
-            out_orig = model(xyz)
-            torch.manual_seed(42)
-            out_rot = model(xyz_rot)
-
-        diff = (out_orig - out_rot).abs().max().item()
-        preds_match = (out_orig.argmax(-1) == out_rot.argmax(-1)).all().item()
-        print(f"\n{name}:")
-        print(f"  Max logit difference:  {diff:.6f}")
-        print(f"  Predictions identical: {preds_match}")
-        if diff < 1e-3:
-            print(f"  ✓ Rotation-invariant (diff < 1e-3)")
-        else:
-            print(f"  ✗ NOT invariant — check implementation")
+        # x = feat3.squeeze(1)
+        return self.classifier(feat3)
