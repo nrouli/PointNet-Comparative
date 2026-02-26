@@ -30,14 +30,14 @@ ModelNet10 is available upon installation of torch_geometric
 To train the model(s) in canonical setting (for example run):
 
 ```
- python3 .\train.py --train_all --epochs 61 --step 2 --batch_size 128 --data_type canonical --learning_rate 5e-4
+ python3 train.py --train_all --epochs 61 --step 2 --batch_size 128 --data_type canonical --learning_rate 5e-4
 ```
 
 and in data augmented setting
 
 
 ```
- python3 .\train.py --train_all --epochs 151 --step 2 --batch_size 128 --rotate --data_type augmented --learning_rate 5e-4
+ python3 train.py --train_all --epochs 151 --step 2 --batch_size 128 --rotate --data_type augmented --learning_rate 5e-4
 ```
 
 the available arguments are:
