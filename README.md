@@ -83,4 +83,6 @@ You can find the pre-trained models in the ```pretrained_models``` folder.
 | CG-PointNet | 71.1 | 48.5 ± 1.1 (↓22.7) | 44.8 ± 1.4 (↓26.4) | 61.0 ± 0.7 (↓10.2) | 37.1 ± 1.2 (↓34.0) |
 | PointNet++ | 64.3 | 67.6 ± 0.8 (↑3.3) | 64.0 ± 1.2 (↓0.4) | 64.2 ± 1.1 (↓0.1) | 64.8 ± 1.1 (↑0.5) |
 | CGA-PointNet++ | 71.9 | 71.0 ± 0.6 (↓0.9) | 71.1 ± 1.0 (↓0.8) | 72.1 ± 0.7 (↑0.1) | 71.7 ± 0.5 (↓0.2) |
+| VN-PointNet | N/A (equivariant by construction) |
+
  
