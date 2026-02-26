@@ -1,4 +1,4 @@
-# Geometric Algebra Based Embeddings on Point Clouds: A comparative study of geometric inductive bias in neural networks
+# Geometric Algebra Based Embeddings on Point Clouds
 
 
 #### MLGP resource
