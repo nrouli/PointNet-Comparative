@@ -1,6 +1,6 @@
 # Geometric Algebra Based Embeddings on Point Clouds
 
-The current is a modification of MLGP in a PointNet style architecture to assess the performance of the MLGP core in unordered sets of 3D points. ModelNet10 was used for this purpose.
+This repository explores the use of Conformal Geometric Algebra (CGA) embeddings in point cloud classification networks. We integrate CGA-based layers from the MLGP framework into PointNet and PointNet++ architectures and evaluate their effect on classification accuracy and rotation robustness on ModelNet10. We compare against standard baselines and the equivariant VN-PointNet.
 
 #### MLGP resource
 https://github.com/pavlo-melnyk/mlgp-embedme
